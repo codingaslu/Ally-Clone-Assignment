@@ -25,7 +25,36 @@ from .config import get_config
 logger = logging.getLogger("ally-vision-agent")
 
 # Constants
-VISION_SYSTEM_PROMPT = "You are Ally, a vision assistant for blind users. Provide extremely concise and clear descriptions. Focus only on the most important elements needed to answer the user's specific question. Ignore changes in color, brightness, or shading caused by sunglasses. Be direct and to the point. Answer as if the scene is fully visible without distortion. Avoid phrases like \"as seen\" or \"looks like,\" and do not describe things based only on visual appearance. When helpful, explain how a screen reader might announce elements. Tailor your response to what a blind user would truly want to know."
+VISION_SYSTEM_PROMPT = "You are Shals, a vision assistant for blind users. Provide extremely concise and clear descriptions. Focus only on the most important elements needed to answer the user's specific question. Ignore changes in color, brightness, or shading caused by sunglasses. Be direct and to the point. Answer as if the scene is fully visible without distortion. Avoid phrases like \"as seen\" or \"looks like,\" and do not describe things based only on visual appearance. When helpful, explain how a screen reader might announce elements. Tailor your response to what a blind user would truly want to know. For walking or travel situations, focus first on safety and navigation: what is directly ahead, what is on the left or right, whether the path seems clear or blocked, and any nearby people, vehicles, doors, stairs, roads, traffic lights, or obstacles. Use simple short guidance such as 'person ahead', 'vehicle on the right', or 'path partly blocked'. Do not give risky final instructions like 'cross now' or 'go now'; instead advise the user to confirm carefully when safety is uncertain. Short Safety Mode: when the user is walking, travelling, asks what is ahead, or asks for surroundings, answer in 1 to 3 very short sentences. Prefer this format when possible: 'Ahead: ... Left: ... Right: ...' Mention only useful safety details. Example: 'Ahead: person sitting. Left: clear. Right: wall.' If the path is unclear, say 'Path unclear, move carefully.' Emergency Warning Style: if vehicles, stairs, road crossings, traffic lights, fast movement, crowds, platforms, train or bus doors, or blocked paths are visible, start with the spoken emergency sound cue 'Beep beep.' followed by a clear warning word such as 'Warning' or 'Careful'. Give the direction and risk in short words, for example 'Beep beep. Warning: vehicle on right. Wait and confirm.' or 'Beep beep. Careful: stairs ahead. Move slowly.' Never say the user is safe to cross, board, or proceed; only describe the risk and ask them to confirm carefully."
+TEXT_READING_SYSTEM_PROMPT = "You are Shals, a classroom reading assistant for blind and visually impaired students. Read visible text from the camera clearly and accurately. Prioritize text on books, notebooks, worksheets, exam papers, signs, notice boards, blackboards, whiteboards, screens, labels, and forms. If the text is readable, speak the exact important text first. Keep the response short unless the user asks for full reading. If the text is long, read the title and first few important lines, then give a simple summary. If the text is blurry, cut off, too small, or not visible, say what is wrong and give a practical instruction such as 'move the camera closer', 'hold the page steady', or 'point at the board'. Do not invent missing words. Do not describe clothing or surroundings unless it helps locate the text."
+TEXT_READING_KEYWORDS = (
+    "read",
+    "text",
+    "written",
+    "board",
+    "blackboard",
+    "whiteboard",
+    "book",
+    "page",
+    "notebook",
+    "worksheet",
+    "paper",
+    "notice",
+    "sign",
+    "label",
+    "screen",
+    "document",
+    "paragraph",
+    "chapter",
+    "question",
+    "exam",
+    "homework",
+)
+
+
+def is_text_reading_query(query: str) -> bool:
+    query_lower = query.lower()
+    return any(keyword in query_lower for keyword in TEXT_READING_KEYWORDS)
 
 @dataclass
 class UserData:
@@ -65,6 +94,7 @@ class AllyVisionAgent(Agent):
             VISUAL QUERIES:
             - For questions about visual content, use analyze_vision tool
             - For ANY request about what you see, use analyze_vision tool immediately
+            - For reading books, pages, boards, notices, signs, labels, screens, worksheets, or written text, use analyze_vision tool immediately
             
             INTERNET SEARCHES:
             - For facts, data, news: use search_internet tool
@@ -104,8 +134,16 @@ class AllyVisionAgent(Agent):
                 punctuate=True,
                 language="en-US"
             ),
-            llm=openai.LLM(model="gpt-4o", parallel_tool_calls=False),
-            tts=elevenlabs.TTS(model="eleven_multilingual_v2")
+            llm=openai.LLM(
+            model="llama-3.3-70b-versatile",
+            base_url="https://api.groq.com/openai/v1",
+            api_key=get_config().get("GROQ_API_KEY"),
+            parallel_tool_calls=False
+            ),
+            tts=elevenlabs.TTS(
+                model="eleven_multilingual_v2",
+                voice_id="EXAVITQu4vr4xnSDxMaL"
+            )
         )
     
     async def on_enter(self) -> None:
@@ -249,7 +287,9 @@ class AllyVisionAgent(Agent):
             
             # Set up visual context
             visual_ctx = ChatContext()
-            visual_ctx.add_message(role="system", content=VISION_SYSTEM_PROMPT)
+            is_text_query = is_text_reading_query(query)
+            system_prompt = TEXT_READING_SYSTEM_PROMPT if is_text_query else VISION_SYSTEM_PROMPT
+            visual_ctx.add_message(role="system", content=system_prompt)
             visual_ctx.add_message(
                 role="user",
                 content=[
@@ -259,14 +299,18 @@ class AllyVisionAgent(Agent):
             )
             
             # Initialize LLM and start analysis
-            analysis_llm = openai.LLM(model="gpt-4o")
+            analysis_llm = openai.LLM(
+            model="llama-3.3-70b-versatile",
+            base_url="https://api.groq.com/openai/v1",
+            api_key=get_config().get("GROQ_API_KEY")
+            )
             asyncio.create_task(self._run_gpt_analysis(userdata, analysis_llm, visual_ctx))
             
             # Try Groq if available - simplified check
             groq_handler = userdata.groq_handler
             if groq_handler and getattr(groq_handler, 'is_ready', False):
                 try:
-                    model_choice, groq_analysis, _ = await groq_handler.model_choice_with_analysis(image, query)
+                    model_choice, groq_analysis, _ = await groq_handler.model_choice_with_analysis(image, query, is_text_query=is_text_query)
                     userdata._model_choice = model_choice
                     userdata._groq_analysis = groq_analysis
                 except Exception:
@@ -528,7 +572,10 @@ async def entrypoint(ctx: JobContext):
             userdata=userdata,
             stt=deepgram.STT(model="nova-2-general", smart_format=True, punctuate=True, language="en-US"),
             llm=openai.LLM(model="gpt-4o", parallel_tool_calls=False),
-            tts=elevenlabs.TTS(model="eleven_multilingual_v2"),
+            tts=elevenlabs.TTS(
+                model="eleven_multilingual_v2",
+                voice_id="EXAVITQu4vr4xnSDxMaL"
+),
             vad=silero.VAD.load(),
             max_tool_steps=3,
         )

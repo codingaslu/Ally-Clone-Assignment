@@ -68,6 +68,14 @@ logs/
 .coverage
 htmlcov/
 .pytest_cache/
+frontend/node_modules/
+frontend/dist/
+frontend/.env
+frontend/concurrently
+frontend/node
+frontend/npm
+frontend/shals-vision-assistant-frontend@*
+frontend/vite
 
 # Images and media
 *.png
